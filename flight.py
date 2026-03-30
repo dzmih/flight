@@ -3,25 +3,22 @@ import math
 from dronekit import connect, VehicleMode
 from pymavlink import mavutil
 
-# ======= НАЛАШТУВАННЯ =======
 SITL_ADDRESS = 'udp:172.25.224.1:14551'
 
-TAKEOFF_ALT = 200.0  # метри
+TAKEOFF_ALT = 200.0
 
 TARGET_LAT = 50.443326
 TARGET_LON = 30.448078
 
-YAW_HOLD = None  # встановиться після зльоту
+YAW_HOLD = None
 
-# RC значення
 RC_MID     = 1500
 RC_THR_MID = 1500
 RC_THR_HOVER = 1510
 
-KP = 0.0  # коефіцієнт пропорційності (відстань -> RC відхилення)
-ARRIVE_DIST = 3.0  # метри — вважаємо що прилетіли
+KP = 0.0
+ARRIVE_DIST = 3.0
 
-# ============================
 
 def get_distance_m(lat1, lon1, lat2, lon2):
     R = 6371000
@@ -45,7 +42,23 @@ def send_rc_override(vehicle, roll, pitch, throttle, yaw):
         '4': yaw
     }
 
+def set_param(vehicle, name, value):
+    vehicle._master.mav.param_set_send(
+        vehicle._master.target_system,
+        vehicle._master.target_component,
+        name.encode('utf-8'),
+        value,
+        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+    )
+    time.sleep(0.5)
+
 def arm_and_takeoff(vehicle, alt):
+    set_param(vehicle, 'SIM_WIND_SPD', 4)
+    set_param(vehicle, 'SIM_WIND_DIR', 30)
+    set_param(vehicle, 'SIM_WIND_TURB', 2)
+    set_param(vehicle, 'SIM_WIND_TURB_FREQ', 0.2)
+    print("Wind params set")
+    time.sleep(2)
     print("Arming...")
     vehicle.mode = VehicleMode("STABILIZE")
     
@@ -65,7 +78,6 @@ def arm_and_takeoff(vehicle, alt):
 
     print(f"Taking off to {alt}m...")
     
-    # Агресивний зліт
     send_rc_override(vehicle, RC_MID, RC_MID, 1700, RC_MID)
     time.sleep(2)
 
@@ -75,14 +87,11 @@ def arm_and_takeoff(vehicle, alt):
         
         if current_alt >= alt * 0.95:
             print("Target altitude reached")
-            # Після "Target altitude reached"
             print("Rotating to face target...")
-            # Просто фіксуємо поточний heading як YAW_HOLD
             global YAW_HOLD
             YAW_HOLD = RC_MID
             break
         
-        # Динамічний throttle залежно від висоти
         if current_alt < alt * 0.5:
             thr = 1700
         elif current_alt < alt * 0.8:
@@ -95,7 +104,9 @@ def arm_and_takeoff(vehicle, alt):
 
 def fly_to_target(vehicle, target_lat, target_lon, hold_alt):
     global YAW_HOLD
-    YAW_HOLD = RC_MID  # фіксований yaw
+
+    fixed_heading = vehicle.heading
+    print(f"Fixed heading: {fixed_heading}")
 
     print(f"Flying to {target_lat}, {target_lon}")
 
@@ -109,22 +120,29 @@ def fly_to_target(vehicle, target_lat, target_lon, hold_alt):
         bearing = get_bearing(curr_lat, curr_lon, target_lat, target_lon)
         heading = vehicle.heading
 
-        print(f"  Dist: {dist:.1f}m | Bearing: {bearing:.1f} | Heading: {heading} | Alt: {curr_alt:.1f}m")
+        heading_err = fixed_heading - heading
+        if heading_err > 180: heading_err -= 360
+        if heading_err < -180: heading_err += 360
+        yaw_rc = int(RC_MID + heading_err * 2)
+        yaw_rc = max(1400, min(1600, yaw_rc))
+        YAW_HOLD = yaw_rc
+
+        print(f"  Dist: {dist:.1f}m | Bearing: {bearing:.1f} | Heading: {heading} | Yaw_err: {heading_err:.1f} | Alt: {curr_alt:.1f}m")
 
         if dist < ARRIVE_DIST:
             print("Arrived at target!")
             break
 
-        # Кут між heading дрона і напрямком до цілі
         angle = math.radians(bearing - heading)
 
-        # Фіксований нахил для крейсерського польоту
-        if dist > 50:
-            tilt = 300  # було 150
+        if dist > 100:
+            tilt = 300
+        elif dist > 50:
+            tilt = 250
         elif dist > 20:
-            tilt = 100  # було 80
+            tilt = 400
         else:
-            tilt = 30
+            tilt = 500
 
         north = math.cos(angle)
         east  = math.sin(angle)
@@ -135,9 +153,8 @@ def fly_to_target(vehicle, target_lat, target_lon, hold_alt):
         pitch_rc = max(1200, min(1800, pitch_rc))
         roll_rc  = max(1200, min(1800, roll_rc))
 
-        # Утримання висоти
         alt_err = hold_alt - curr_alt
-        thr = int(1510 + alt_err * 5)  # було 1530 + alt_err * 3
+        thr = int(1510 + alt_err * 5)
         thr = max(1400, min(1650, thr))
 
         send_rc_override(vehicle, roll_rc, pitch_rc, thr, YAW_HOLD)
@@ -147,7 +164,7 @@ def fly_to_target(vehicle, target_lat, target_lon, hold_alt):
 
 def land(vehicle):
     print("Landing...")
-    vehicle.parameters['LAND_SPEED'] = 150  # см/с, було ~50
+    set_param(vehicle, 'LAND_SPEED', 150)
     vehicle.mode = VehicleMode("LAND")
     while vehicle.location.global_relative_frame.alt > 0.5:
         print(f"  Alt: {vehicle.location.global_relative_frame.alt:.1f}m")
@@ -155,7 +172,6 @@ def land(vehicle):
     print("Landed!")
     vehicle.channels.overrides = {}
 
-# ======= MAIN =======
 print("Connecting...")
 vehicle = connect(SITL_ADDRESS, wait_ready=True)
 print(f"Connected. Mode: {vehicle.mode.name}")
